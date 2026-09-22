@@ -131,8 +131,9 @@ You are a principal engineer evaluating the high-level intent, architectural sou
   2. No Unrelated Changes (Single Responsibility): Does the commit contain unrelated changes, drive-by edits, or mixed concerns? It must NOT — each commit must implement one consistent, self-sufficient change. Flag commits that bundle unrelated changes that should be split into separate commits.
   3. Problem Validity & Worth: Is the problem real and worth solving? Flag over-engineered solutions to hypothetical or non-existent problems, or changes whose complexity outweighs their benefit.
   4. Solution Optimality & Alternatives: Is the chosen solution the best engineering approach, or are there obviously simpler, safer, or more idiomatic alternatives? If a clearly superior alternative exists, raise a concern explaining why.
-- Benchmark Backing for Review-Quality Changes (HIGH Severity): Do NOT demand benchmark data, measurements, or manual test procedures in commit messages for ordinary code, CLI, UI, or bug-fix commits where correctness is clear. However, if a change can meaningfully affect the overall quality of AI reviews across the board (such as global prompts, stage instructions, workflow graph structure, planner logic, model parameters, or verification/deduplication rules), it MUST be backed up by benchmark evaluation data (`benchmarks/`). If a review-quality-affecting change lacks benchmark validation or risks degrading detection rate or precision, flag it as a High severity issue.
+- Benchmark Backing for Linux Review-Quality Changes (HIGH Severity): Do NOT demand benchmark data, measurements, or manual test procedures in commit messages for ordinary code, CLI, UI, or bug-fix commits where correctness is clear, nor for changes to Sashiko's own self-review prompts (`prompts/sashiko/`, `sashiko_patch_review.rs`) since `benchmarks/` only covers Linux kernel reviews. However, if a change can meaningfully affect overall Linux AI review quality across the board (such as `third_party/prompts/`, `linux_patch_review.rs`, `linux_bug.rs`, generic workflow graph structure, model parameters, or shared verification/deduplication rules), it MUST be backed up by benchmark evaluation data (`benchmarks/`). If such a Linux review-quality change lacks benchmark validation or risks degrading detection rate or precision, flag it as a High severity issue.
 - Unix-Only Target Environment: Sashiko exclusively targets Linux/Unix environments. NEVER report non-Unix or Windows compilation/portability issues (such as `tokio::signal::unix`, `rustix`, `/dev/ptmx`, `libc`, or POSIX signals/paths) as concerns.
+- Never Vibe-Guess Build or Compilation Bugs: Build verification (`cargo check`, `cargo test`, `cargo clippy`) is deterministic. NEVER report alleged build failures, syntax errors, missing imports (`use`), unresolved symbols/types/methods/macros, type mismatches, missing trait bounds, borrow-checker/lifetime errors, or Cargo build issues.
 - Global UX & Regressions: If the change can affect the user experience globally (CLI ergonomics, review output clarity/false-positive rate, progress display, or web UI/API behavior), apply maximum scrutiny and reject regressions.
 - Architectural Boundaries: Check whether the change violates instance isolation, leaks project-specific assumptions into generic engines, or introduces subtle regressions in daemon/worker coordination.
 - Commit Message Audit (Mandatory): Inspect the commit message header, body, and trailers in the patch:
@@ -143,7 +144,9 @@ You are a principal engineer evaluating the high-level intent, architectural sou
 const STAGE_IMPLEMENTATION_INSTRUCTION: &str = r#"# Verify implementation against intent
 
 Verify that the code changes faithfully and completely implement what the commit message and design claim.
-- Check for incomplete refactors: if a new enum variant, CLI flag, or configuration field is added, verify every match arm, subprocess boundary (`reviewer.rs`, `sashiko-cli`), and serialization path handles it.
+- Check for incomplete refactors at runtime boundaries: if a new enum variant, CLI flag, or configuration field is added, verify that wildcard/catch-all match arms (`_ => ...`), subprocess boundaries (`reviewer.rs`, `sashiko-cli`), and serialization paths handle it properly. Do NOT vibe-guess compile-time errors (such as non-exhaustive match arms on closed enums, missing imports, unresolved symbols/types, type mismatches, or borrow-checker errors) — build verification is deterministic.
+- Series Context Rule: If follow-up patches in this series are listed in the prompt context, check whether newly introduced types, helpers, schema changes, or configuration fields are wired up in subsequent patches of the series (`Series End Commit`) before flagging them as unused or incomplete.
+- Design Document Cross-Check: If this commit adds or updates a design document (`designs/*.md`) or documentation, verify any abbreviated code snippets against the actual Rust implementation in `src/` at the series head (`Series End Commit` / `HEAD`) before reporting an issue.
 - Check edge cases: empty inputs, missing optional fields, zero/boundary values, and fallback behavior.
 - Verify that error paths clean up state properly rather than leaving half-applied mutations.
 - Never report Windows or non-Unix portability concerns; Sashiko is strictly a Linux/Unix system."#;
@@ -153,7 +156,8 @@ const STAGE_EXECUTION_FLOW_INSTRUCTION: &str = r#"# Trace execution flow and pan
 Trace the execution paths through every modified function and caller.
 - Audit strictly for panic vectors on untrusted or runtime inputs: `.unwrap()`, `.expect()`, direct slice/array indexing (`[i]`), or string slicing (`&s[..n]`) that could land inside a multi-byte UTF-8 character.
 - Audit for silently swallowed errors (`let _ = ...`, `.ok()`, `.unwrap_or_default()`) on critical operations such as database status updates, worktree cleanup, or structured LLM output parsing.
-- Check numeric casts (`as`) and arithmetic for potential truncation or underflow/overflow."#;
+- Check numeric casts (`as`) and arithmetic for potential truncation or underflow/overflow.
+- Never vibe-guess or report compile-time/build errors (borrow-checker, lifetime/move, type mismatch, unresolved import/symbol, or missing trait bound errors); focus strictly on runtime behavior and panics."#;
 
 const STAGE_CONCURRENCY_INSTRUCTION: &str = r#"# Audit async Tokio discipline and concurrency
 
@@ -192,6 +196,7 @@ Audit external interfaces, configuration schemas, email delivery, and cross-proc
 - Email Safety (CRITICAL): Be EXTRA careful with any change touching email routing (`src/email_router.rs`), policy (`src/email_policy.rs`), or delivery (`src/worker/email.rs`). Emails sent to public mailing lists are preserved forever and can destroy Sashiko's reputation in a few hours. Flag any risk of widening recipients, bypassing `dry_run` or embargo rules, causing bot reply loops, or sending malformed/duplicate messages.
 - Settings (`src/settings.rs`): since `Settings` structs use `#[serde(deny_unknown_fields)]`, verify any new or renamed field has a sensible `#[serde(default)]` and is documented in `docs/examples/Settings.example.toml`.
 - Subprocess CLI flags: when the daemon spawns worker subprocesses (`sashiko review` or `sashiko worker`), verify all relevant global flags (`--project`, `--settings`, etc.) are forwarded across the process boundary.
+- Series Context Rule: If this commit is part of a multi-patch series, check whether CLI subcommands, HTTP endpoints, or configuration consumers are wired in subsequent patches of the series (`Series End Commit`) before flagging missing interface wiring.
 - REST API & UX: verify API response shapes remain backwards-compatible and global user-facing behavior does not regress.
 - Target OS: Sashiko runs exclusively on Linux/Unix. Never flag Unix-specific APIs or lack of Windows support."#;
 
@@ -219,8 +224,13 @@ Compare the consolidated concerns against the consolidated dismissed concerns.
 const STAGE_VERIFICATION_INSTRUCTION: &str = r#"# Verify remaining concerns and calibrate severity
 
 For each remaining concern, use the available Git and file tools to inspect the actual code in the worktree and verify whether the defect is real.
-- If concrete code proves the concern is a false positive, drop it.
-- For each verified issue, assign an accurate severity (`Critical`, `High`, `Medium`, or `Low`) strictly following `severity.md`, and formulate a concise bug title (`problem`) under 80 characters starting with a Sashiko component prefix (e.g. `workflow:`, `db:`, `reviewer:`, `toolbox:`, `api:`, `cli:`)."#;
+1. Drop any concern that alleges a build, compilation, syntax, type-checking, borrow-checker, lifetime, missing-import, unresolved-symbol, missing-trait-bound, or linter error. Build correctness is verified deterministically by the compiler; LLMs must never vibe-guess build failures.
+2. SERIES VALIDATION RULE: If other patches in this series are provided in the context, check whether each identified concern is resolved, wired up, or refactored in the final state of the series (`Series End Commit`). If a concern is simply work-in-progress completed in a subsequent patch of the series (e.g., types or helpers introduced in Patch 1 and wired to HTTP endpoints or CLI commands in Patch 2 or 3) or fixed by the end of the series, you MUST discard the concern and NOT report it as a finding. You MUST verify this by checking the actual code at the end of the series using tools (`git_read_files` or `git_diff` with `revision` / `target_revision` set to the `Series End Commit`); do not trust promises in commit messages alone.
+3. DESIGN & DOCUMENTATION RULE: If a concern targets illustrative pseudo-code or abbreviated struct snippets in documentation (`designs/*.md`, `README.md`, `prompts/*.md`), inspect the actual Rust implementation in `src/` at the series head (`Series End Commit` / `HEAD`). If the actual Rust code properly enforces the invariant (e.g., `#[serde(default)]`, validation, or auth checks), discard the documentation concern as a false positive.
+4. When referring to other patches within this series in your explanation, DO NOT use ephemeral git hashes. Instead, refer to them by their patch subject (e.g., 'commit "auth: add max_bug_access claim"').
+5. If concrete code proves the concern is a false positive, drop it.
+6. If the problem already existed in the codebase before this commit/series was applied, mark `"preexisting": true` so it is routed exclusively to the bugs database and NOT reported as a finding on this patch.
+7. For each verified issue, assign an accurate severity (`Critical`, `High`, `Medium`, or `Low`) strictly following `severity.md`, and formulate a concise bug title (`problem`) under 80 characters starting with a Sashiko component prefix (e.g. `workflow:`, `db:`, `reviewer:`, `toolbox:`, `api:`, `cli:`)."#;
 
 const STAGE_REPORT_INSTRUCTION: &str = r#"# Generate plain-text inline review report
 
@@ -301,7 +311,7 @@ pub static ANALYSIS_STAGES: &[AnalysisStage] = &[
         guides: &[],
         uses_commit_log: true,
         optional: false,
-        wants_series_context: false,
+        wants_series_context: true,
     },
     AnalysisStage {
         name: "execution-flow",
@@ -364,7 +374,7 @@ pub static ANALYSIS_STAGES: &[AnalysisStage] = &[
         guides: &["subsystem/settings.md", "subsystem/email-policy.md"],
         uses_commit_log: true,
         optional: true,
-        wants_series_context: false,
+        wants_series_context: true,
     },
     AnalysisStage {
         name: "tests",
@@ -975,8 +985,9 @@ Return ONLY a JSON object with a 'findings' array. Each object in the 'findings'
                         "locations": finding.get("locations").cloned().unwrap_or(json!([])),
                     });
                     state.concerns.push(concern);
+                } else {
+                    new_findings.push(finding);
                 }
-                new_findings.push(finding);
             }
             state.findings = new_findings;
         })
@@ -1207,5 +1218,104 @@ mod tests {
         );
         // Idempotent when already separated by empty lines
         assert_eq!(format_sashiko_inline_findings(&formatted), formatted);
+    }
+
+    #[test]
+    fn test_series_context_enabled_for_sashiko_wiring_and_verification_stages() {
+        for stage_name in ["goal", "implementation", "interfaces-compat", "tests"] {
+            let def = analysis_stage_by_name(stage_name).expect(stage_name);
+            assert!(
+                def.wants_series_context,
+                "{stage_name} should have wants_series_context enabled"
+            );
+        }
+        assert!(VERIFICATION.wants_series_context);
+    }
+
+    #[tokio::test]
+    async fn test_sashiko_verification_routes_preexisting_only_to_concerns_not_findings() {
+        struct MockVerificationProvider;
+
+        #[async_trait::async_trait]
+        impl crate::ai::AiProvider for MockVerificationProvider {
+            async fn generate_content(
+                &self,
+                _request: crate::ai::AiRequest,
+            ) -> anyhow::Result<crate::ai::AiResponse> {
+                Ok(crate::ai::AiResponse {
+                    content: Some(
+                        r#"{
+                            "findings": [
+                                {
+                                    "problem": "db: pre-existing missing index on patches table",
+                                    "severity": "Medium",
+                                    "severity_explanation": "Existed before this commit.",
+                                    "preexisting": true,
+                                    "locations": []
+                                },
+                                {
+                                    "problem": "api: newly introduced panic on empty header",
+                                    "severity": "High",
+                                    "severity_explanation": "Introduced by this patch.",
+                                    "preexisting": false,
+                                    "locations": []
+                                }
+                            ]
+                        }"#
+                        .to_string(),
+                    ),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: None,
+                    truncated: false,
+                })
+            }
+
+            fn get_capabilities(&self) -> crate::ai::ProviderCapabilities {
+                crate::ai::ProviderCapabilities {
+                    model_name: "mock".to_string(),
+                    context_window_size: 1000,
+                }
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prompts_dir = temp_dir.path().join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("false-positive-guide.md"), "").unwrap();
+        std::fs::write(prompts_dir.join("severity.md"), "").unwrap();
+
+        let provider = std::sync::Arc::new(MockVerificationProvider);
+        let tools = std::sync::Arc::new(crate::toolbox::ToolBox::new(
+            temp_dir.path().to_path_buf(),
+            None,
+        ));
+        let env = crate::workflow::stage::WorkflowEnv {
+            provider,
+            tools,
+            base_dir: &prompts_dir,
+            context_tag: None,
+        };
+
+        let mut state = SashikoPatchReviewState {
+            patch_concerns: vec![json!({"description": "candidate"})],
+            ..Default::default()
+        };
+
+        let stage = verification_stage(1, 0.0);
+        stage.execute(&env, &mut state, None).await.unwrap();
+
+        assert_eq!(state.findings.len(), 1);
+        assert_eq!(
+            state.findings[0]["problem"],
+            "api: newly introduced panic on empty header"
+        );
+        assert_eq!(state.concerns.len(), 1);
+        assert_eq!(
+            state.concerns[0]["description"],
+            "db: pre-existing missing index on patches table"
+        );
+        assert_eq!(state.concerns[0]["preexisting"], true);
     }
 }

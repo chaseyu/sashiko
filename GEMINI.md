@@ -3,7 +3,7 @@ You're an expert Software Engineer with deep knowledge of Rust, Distributed Syst
 
 # Generic guidance
 - You MUST commit changes to it after implementing each task or more often if it makes sense. Try to commit as often as possible. Every consistent and self-sufficient change must be committed.
-- Sign all commits using the user's git configuration. Every commit **MUST** include a `Signed-off-by` line (e.g., using `git commit -s` which automatically uses the user's `user.name` and `user.email`). **NO EXCEPTIONS.** Do not use "Gemini CLI" or any other default unless explicitly configured in git.
+- Sign all commits using the user's git configuration. Every commit **MUST** include a `Signed-off-by` line (e.g., using `git commit -s` which automatically uses the user's `user.name` and `user.email`). **NO EXCEPTIONS.** Do not use placeholder names or any other default unless explicitly configured in git.
 - Make sure no lines in the commit message exceed 72 characters. Hard-wrap the commit message body to enforce this length.
 - **Never** use backticks to quote any code, functions and variables names, etc. in the commit message.
 - **Never** include metadata tags like `TAG` or `CONV` in commit messages. Only include standard git trailers (like `Signed-off-by`).
@@ -31,6 +31,12 @@ Use `make` to run common development tasks:
 - `make check-pr`: Run all checks required for a Pull Request (`sob`, `lint`, `test`).
 - `make check-all`: Run the complete suite including integration tests and database invariants (`check-pr`, `check-integration`, `check-db-invariants`).
 - `make check-db-invariants`: Run lightweight database invariant checks.
+
+## 3. Self-Review (Sashiko for Sashiko)
+Sashiko can review changes to its own repository using the `--project sashiko` profile:
+- **Workflow & Prompts:** Defined by `src/workflows/sashiko_patch_review.rs` and first-party prompt guides under `prompts/sashiko/` (distinct from the vendored upstream prompts in `third_party/prompts/`).
+- **Running Local Self-Review:** Run `cargo run --bin sashiko -- review --project sashiko <commit>` to execute the multi-stage Sashiko self-review pipeline against a commit in a temporary worktree.
+- **Scope:** Audits Sashiko-specific invariants across subsystems (`prompts/sashiko/subsystem/*.md`) and cross-cutting patterns (`prompts/sashiko/patterns/*.md`), including UX, SQLite migrations and query scaling, email delivery safety, untrusted input boundaries, Tokio/async discipline, and commit message hygiene. Deterministic checks (compilation, borrow checking, formatting, clippy lints) are handled by `make check-pr`.
 
 # Rust Coding Standards
 
@@ -86,6 +92,7 @@ Use `make` to run common development tasks:
 - `lib.rs`: Shared library code.
 - `worker/`: Background worker implementations (Review, Security, AI).
 - `workflow/`: The core state-machine workflow engine.
+- `workflows/`: Declarative review pipelines per project (`linux_patch_review.rs`, `linux_bug.rs`, `sashiko_patch_review.rs`).
 - `toolbox/`: Tooling and capabilities for agents.
 - `ai/`: Artificial Intelligence integration logic.
 - `ingestor.rs`: Ingests patches/emails.
@@ -100,13 +107,15 @@ Use `make` to run common development tasks:
 - `db.rs`: Database interactions.
 - `api.rs`: API endpoints.
 - `settings.rs`: Application settings management.
+- `project.rs`: Target project profile selection (`linux`, `sashiko`, etc.).
 - `events.rs`: Event handling system.
 - `baseline.rs`: Baseline detection logic.
 
 ## Configuration & Assets
 - `Settings.toml`: Main application configuration.
 - `email_policy.toml`: Email policy configuration.
-- `third_party/prompts/`: Markdown templates/prompts for AI reviews.
+- `prompts/sashiko/`: First-party review prompts, subsystem invariants, and pattern guides for reviewing Sashiko itself (`--project sashiko`).
+- `third_party/prompts/`: Markdown templates/prompts for AI reviews of upstream projects (Linux kernel, systemd, iproute).
 - `skills/`: Agent skills directory.
 - `static/`: Web assets (HTML, images).
 

@@ -109,8 +109,14 @@ impl FetchAgent {
                 if commit_or_range.contains("..") {
                     let parts: Vec<&str> = commit_or_range.split("..").collect();
                     if parts.len() == 2 {
-                        commits_to_check.push(parts[0].to_string());
-                        commits_to_check.push(parts[1].to_string());
+                        let base = parts[0];
+                        let head = parts[1].trim_start_matches('.');
+                        if !base.is_empty() {
+                            commits_to_check.push(base.to_string());
+                        }
+                        if !head.is_empty() {
+                            commits_to_check.push(head.to_string());
+                        }
                     }
                 } else {
                     commits_to_check.push(commit_or_range.clone());
@@ -350,10 +356,17 @@ impl FetchAgent {
     }
 
     async fn ensure_remote(&self, name: &str, url: &str) -> Result<()> {
-        // Inject GitLab token if available
+        // Inject GitLab token via parsed url::Url to prevent parser differentials.
         let authenticated_url = if let Some(token) = &self.gitlab_token {
-            if url.contains("gitlab.com") && url.starts_with("https://") {
-                url.replace("https://", &format!("https://oauth2:{}@", token))
+            if let Ok(mut parsed) = url::Url::parse(url)
+                && parsed.scheme() == "https"
+                && parsed
+                    .host_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case("gitlab.com"))
+            {
+                let _ = parsed.set_username("oauth2");
+                let _ = parsed.set_password(Some(token));
+                parsed.to_string()
             } else {
                 url.to_string()
             }
@@ -406,7 +419,7 @@ impl FetchAgent {
             if !output.status.success() {
                 return Err(anyhow!(
                     "Failed to add remote: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    redact_secret(String::from_utf8_lossy(&output.stderr).trim())
                 ));
             }
         }
@@ -453,13 +466,27 @@ impl FetchAgent {
 
     async fn fetch_commits(&self, remote: &str, commits: &[String]) -> Result<()> {
         let mut args = vec![remote];
-        args.extend(commits.iter().map(String::as_str));
+        for commit in commits {
+            if commit.is_empty()
+                || commit.chars().any(char::is_whitespace)
+                || commit.starts_with('-')
+                || commit.starts_with('+')
+                || commit.contains(':')
+            {
+                warn!("Skipping invalid commit ref in fetch batch: {}", commit);
+                continue;
+            }
+            args.push(commit.as_str());
+        }
+        if args.len() == 1 {
+            return Err(anyhow!("No valid commit refs to fetch"));
+        }
 
         let output = self.fetch_with_graph_retry(&args).await?;
         if !output.status.success() {
             return Err(anyhow!(
                 "Fetch failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                redact_secret(String::from_utf8_lossy(&output.stderr).trim())
             ));
         }
         Ok(())
@@ -471,7 +498,7 @@ impl FetchAgent {
         if !output.status.success() {
             return Err(anyhow!(
                 "Fetch all failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                redact_secret(String::from_utf8_lossy(&output.stderr).trim())
             ));
         }
         Ok(())
